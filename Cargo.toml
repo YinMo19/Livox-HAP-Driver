@@ -1,0 +1,27 @@
+[package]
+name = "publisher_node"
+version = "0.4.1"
+authors = ["Esteve Fernandez <esteve@apache.org>"]
+edition = "2021"
+
+
+[dependencies]
+anyhow = {version = "1", features = ["backtrace"]}
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "net"] }
+crc = "3.2.1"
+byteorder = "1.5.0"
+async-std = { version = "1.13.1", features = ["attributes"] }
+std_msgs = "*"
+sensor_msgs = "*"
+builtin_interfaces = "*"
+env_logger = "0.11.8"
+log = "0.4.27"
+
+[dependencies.rclrs]
+version = "0.4"
+
+[dependencies.rosidl_runtime_rs]
+version = "0.4"
+
+[dependencies.example_interfaces]
+version = "*"
