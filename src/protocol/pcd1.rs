@@ -2,7 +2,9 @@ use super::constants::*;
 use super::header::parse_header;
 use byteorder::{LittleEndian, ReadBytesExt};
 use crc::{Crc, CRC_32_ISO_HDLC};
+use rclrs::*;
 use std::io::Cursor;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Pcd1 {
@@ -35,26 +37,26 @@ pub fn parse_pcd1(data: &[u8]) -> Option<Vec<Pcd1>> {
 
     Some(points)
 }
-pub fn check_header_pcd1(data: &[u8]) -> bool {
+pub fn check_header_pcd1(data: &[u8], node: Arc<Node>) -> bool {
     if let Some(header) = parse_header(data) {
         if header.version != 0 {
-            log::error!("Header version is not 0");
+            log_error!(node.as_ref(), "Header version is not 0");
             return false;
         }
         if header.length as usize != PC_MSG_SIZE {
-            log::error!("Header length is not {}", PC_MSG_SIZE);
+            log_error!(node.as_ref(), "Header length is not {}", PC_MSG_SIZE);
             return false;
         }
         if header.dot_num as usize != DOT_NUM {
-            log::error!("Dot number is not {}", DOT_NUM);
+            log_error!(node.as_ref(), "Dot number is not {}", DOT_NUM);
             return false;
         }
         if header.data_type != 1 {
-            log::error!("Data type is not 1 (PCD1)");
+            log_error!(node.as_ref(), "Data type is not 1 (PCD1)");
             return false;
         }
         if (header.pack_info & 0x03) != 0 {
-            log::error!("Pack info is not 0");
+            log_error!(node.as_ref(), "Pack info is not 0");
             return false;
         }
 
@@ -68,7 +70,8 @@ pub fn check_header_pcd1(data: &[u8]) -> bool {
         let computed_crc = digest.finalize();
 
         if computed_crc != header.crc32 {
-            log::error!(
+            log_error!(
+                node.as_ref(),
                 "CRC32 mismatch: computed {:x}, expected {:x}",
                 computed_crc,
                 header.crc32

@@ -56,11 +56,6 @@ pub struct LivoxLidar {
 
 impl LivoxLidar {
     pub async fn new(node: Arc<Node>) -> Result<Self> {
-        // Initialize logger
-        if let Err(e) = env_logger::try_init() {
-            eprintln!("Failed to initialize logger: {}", e);
-        }
-
         let dest_ip = node
             .declare_parameter("dest_ip")
             .default(Ipv4AddrWrapper("192.168.1.1".parse().unwrap()))
@@ -95,8 +90,10 @@ impl LivoxLidar {
             None => "default_lidar_frame".to_string(),
         };
 
-        log::info!("Initializing Livox Lidar with frame_id: {}", frame_id);
-        log::info!(
+        log_info!(node.as_ref(), "Initializing with frame_id: {}", frame_id);
+
+        log_info!(
+            node.as_ref(),
             "Parameters: batch_dot_num={}, line_num={}",
             batch_dot_num.get(),
             line_num.get()
@@ -105,7 +102,7 @@ impl LivoxLidar {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, local_port.get() as u16))
             .await
             .map_err(|e| {
-                log::error!("Failed to bind UDP socket: {}", e);
+                log_error!(node.as_ref(), "Failed to bind UDP socket: {}", e);
                 Error::msg(e)
             })?;
 
@@ -113,14 +110,14 @@ impl LivoxLidar {
             .connect((dest_ip.get().0, protocol::DEST_PORT))
             .await
             .map_err(|e| {
-                log::error!("Failed to connect to Livox device: {}", e);
+                log_error!(node.as_ref(), "Failed to connect to Livox device: {}", e);
                 Error::msg(e)
             })?;
 
         let pc_pub = node
             .create_publisher::<PointCloud2>("pc_raw".keep_last(10).transient_local())
             .map_err(|e| {
-                log::error!("Failed to create publisher: {}", e);
+                log_error!(node.as_ref(), "Failed to create publisher: {}", e);
                 Error::msg(e)
             })?;
 
@@ -211,12 +208,12 @@ impl LivoxLidar {
 
         match self.socket.send(&buf[..frame_size]).await {
             Ok(_) => {
-                log::info!("Control frame sent successfully");
+                log_info!(self.node.as_ref(), "Control frame sent successfully");
                 self.need_start = false;
                 Ok(())
             }
             Err(e) => {
-                log::error!("Failed to send control frame: {}", e);
+                log_error!(self.node.as_ref(), "Failed to send control frame: {}", e);
                 self.need_start = true;
                 Err(Error::msg(e))
             }
@@ -236,7 +233,10 @@ impl LivoxLidar {
 
         // Ensure we don't write out of bounds
         if offset + self.pc_msg.point_step as usize > self.pc_msg.data.len() {
-            log::warn!("Point cloud buffer full, discarding point");
+            log_warn!(
+                self.node.as_ref(),
+                "Point cloud buffer full, discarding point"
+            );
             return;
         }
 
@@ -268,8 +268,12 @@ impl LivoxLidar {
             };
 
             match self.pc_pub.publish(self.pc_msg.clone()) {
-                Ok(_) => log::debug!("Published point cloud with {} points", self.point_count),
-                Err(e) => log::error!("Failed to publish point cloud: {}", e),
+                Ok(_) => log_debug!(
+                    self.node.as_ref(),
+                    "Published point cloud with {} points",
+                    self.point_count
+                ),
+                Err(e) => log_error!(self.node.as_ref(), "Failed to publish point cloud: {}", e),
             }
 
             // Reset for next batch
@@ -310,7 +314,7 @@ impl LivoxLidar {
             // Send control frame if needed
             if self.need_start {
                 if let Err(e) = self.send_control_frame().await {
-                    log::error!("Failed to send control frame: {}", e);
+                    log_error!(self.node.as_ref(), "Failed to send control frame: {}", e);
                     // Wait before retrying
                     task::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -322,18 +326,22 @@ impl LivoxLidar {
                 match self.socket.recv_from(&mut buf).await {
                     Ok((size, _)) => {
                         if size < 28 {
-                            log::warn!("Received packet too small ({} bytes)", size);
+                            log_warn!(
+                                self.node.as_ref(),
+                                "Received packet too small ({} bytes)",
+                                size
+                            );
                             return Ok(0);
                         }
 
-                        if !protocol::check_header_pcd1(&buf) {
-                            log::warn!("Invalid PCD1 header");
+                        if !protocol::check_header_pcd1(&buf, self.node.clone()) {
+                            log_warn!(self.node.as_ref(), "Invalid PCD1 header");
                             return Ok(0);
                         }
 
                         if let Some(header) = protocol::parse_header(&buf) {
                             if header.version != 0 || header.data_type != 1 {
-                                log::warn!("Unsupported version or data type");
+                                log_warn!(self.node.as_ref(), "Unsupported version or data type");
                                 return Ok(0);
                             }
 
@@ -356,11 +364,11 @@ impl LivoxLidar {
             {
                 Ok(Ok(_)) => {} // Successfully received data
                 Ok(Err(e)) => {
-                    log::error!("Error receiving data: {}", e);
+                    log_error!(self.node.as_ref(), "Error receiving data: {}", e);
                     self.need_start = true;
                 }
                 Err(_) => {
-                    log::warn!("Receive timeout");
+                    log_warn!(self.node.as_ref(), "Receive timeout");
                     self.need_start = true;
                 }
             }
