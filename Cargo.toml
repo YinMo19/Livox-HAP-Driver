@@ -1,7 +1,7 @@
 [package]
-name = "publisher_node"
-version = "0.4.1"
-authors = ["Esteve Fernandez <esteve@apache.org>"]
+name = "livox_hap_driver"
+version = "0.1.1"
+authors = ["YinMo19 <me@yinmo19.top>"]
 edition = "2021"
 
 
