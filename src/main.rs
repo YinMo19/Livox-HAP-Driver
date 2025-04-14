@@ -1,16 +1,23 @@
 use anyhow::Error;
-use async_std::task;
 
 use livox_lidar::LivoxLidar;
 use rclrs::*;
 mod livox_lidar;
 mod protocol;
+use std::env;
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> Result<(), Error> {
-    let context = Context::default_from_env()?;
-    let mut executor = context.create_basic_executor();
-    let node = executor.create_node("livox_lidar")?;
+    let namespace = env::args()
+        .find(|arg| arg.starts_with("__ns:="))
+        .map(|arg| arg.replace("__ns:=", ""))
+        .unwrap_or("/your_namespace".to_string());
+
+    // println!("{namespace}");
+    let mut executor = Context::default().create_basic_executor();
+    let node = executor.create_node("hap_driver".namespace(namespace.as_str()))?;
+
+    // let node = executor.create_node("livox_lidar")?;
     log_info!(node.as_ref(), "Initializing Livox Lidar driver");
 
     let mut lidar = match LivoxLidar::new(node.clone()).await {
@@ -21,7 +28,7 @@ async fn main() -> Result<(), Error> {
         }
     };
 
-    task::spawn(async move {
+    tokio::spawn(async move {
         lidar.run().await;
     });
 

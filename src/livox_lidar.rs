@@ -1,10 +1,10 @@
 use anyhow::{Error, Result};
-use async_std::net::UdpSocket;
-use async_std::task;
 use builtin_interfaces;
 use rclrs::*;
 use sensor_msgs::msg::PointCloud2;
-use std::{net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{net::Ipv4Addr, sync::Arc};
+use tokio::net::UdpSocket;
+use tokio::time::Duration;
 
 use crate::protocol;
 
@@ -58,7 +58,7 @@ impl LivoxLidar {
     pub async fn new(node: Arc<Node>) -> Result<Self> {
         let dest_ip = node
             .declare_parameter("dest_ip")
-            .default(Ipv4AddrWrapper("192.168.1.1".parse().unwrap()))
+            .default(Ipv4AddrWrapper("192.168.1.101".parse().unwrap()))
             .mandatory()
             .map_err(|e| Error::msg(e))?;
 
@@ -94,7 +94,9 @@ impl LivoxLidar {
 
         log_info!(
             node.as_ref(),
-            "Parameters: batch_dot_num={}, line_num={}",
+            "Initializing with parameters: dest_ip={}, port={}, batch_dot_num={}, line_num={}",
+            dest_ip.get().0,
+            local_port.get(),
             batch_dot_num.get(),
             line_num.get()
         );
@@ -103,14 +105,6 @@ impl LivoxLidar {
             .await
             .map_err(|e| {
                 log_error!(node.as_ref(), "Failed to bind UDP socket: {}", e);
-                Error::msg(e)
-            })?;
-
-        socket
-            .connect((dest_ip.get().0, protocol::DEST_PORT))
-            .await
-            .map_err(|e| {
-                log_error!(node.as_ref(), "Failed to connect to Livox device: {}", e);
                 Error::msg(e)
             })?;
 
@@ -127,7 +121,7 @@ impl LivoxLidar {
         pc_msg.height = 1;
         pc_msg.width = batch_dot_num.get() as u32;
         pc_msg.is_bigendian = false;
-        pc_msg.point_step = 24; // x,y,z (float32) + intensity (float32) + tag (uint8) + resv (uint8) + timestamp (float64)
+        pc_msg.point_step = 26; // x,y,z (float32) + intensity (float32) + tag (uint8) + resv (uint8) + timestamp (float64)
         pc_msg.row_step = pc_msg.width * pc_msg.point_step;
         pc_msg.is_dense = true;
 
@@ -189,7 +183,7 @@ impl LivoxLidar {
             pc_pub,
             pc_msg,
             point_count: 0,
-            need_start: true, // Start with need_start true to send initial control frame
+            need_start: true,
         })
     }
 
@@ -206,7 +200,19 @@ impl LivoxLidar {
             return Err(Error::msg("Failed to build control frame"));
         }
 
-        match self.socket.send(&buf[..frame_size]).await {
+        log_info!(
+            self.node.as_ref(),
+            "Sending control frame to {}:{} with payload: {:02x?}",
+            self.dest_ip,
+            protocol::DEST_PORT,
+            payload
+        );
+
+        match self
+            .socket
+            .send_to(&buf[..frame_size], (self.dest_ip, protocol::DEST_PORT))
+            .await
+        {
             Ok(_) => {
                 log_info!(self.node.as_ref(), "Control frame sent successfully");
                 self.need_start = false;
@@ -220,6 +226,37 @@ impl LivoxLidar {
         }
     }
 
+    fn publish_current_batch(&mut self) {
+        let now = self.node.get_clock().now();
+        self.pc_msg.header.stamp = builtin_interfaces::msg::Time {
+            sec: (now.nsec / 1_000_000_000) as i32,
+            nanosec: (now.nsec % 1_000_000_000) as u32,
+        };
+
+        // 更新消息的点数
+        self.pc_msg.width = self.point_count as u32;
+        self.pc_msg.row_step = self.pc_msg.width * self.pc_msg.point_step;
+
+        match self.pc_pub.publish(self.pc_msg.clone()) {
+            Ok(_) => log_debug!(
+                self.node.as_ref(),
+                "Published point cloud with {} points",
+                self.point_count
+            ),
+            Err(e) => log_error!(self.node.as_ref(), "Failed to publish point cloud: {}", e),
+        }
+
+        // 重置点计数和清空缓冲区
+        self.point_count = 0;
+
+        // 重新设置消息宽度为最大批次大小
+        self.pc_msg.width = self.batch_dot_num as u32;
+        self.pc_msg.row_step = self.pc_msg.width * self.pc_msg.point_step;
+
+        // 清空或重新分配缓冲区
+        self.pc_msg.data = vec![0; (self.pc_msg.width * self.pc_msg.point_step) as usize];
+    }
+
     fn write_point_to_pc2(
         &mut self,
         x: f32,
@@ -229,68 +266,62 @@ impl LivoxLidar {
         tag: u8,
         timestamp: f64,
     ) {
-        let offset = self.point_count * self.pc_msg.point_step as usize;
-
-        // Ensure we don't write out of bounds
-        if offset + self.pc_msg.point_step as usize > self.pc_msg.data.len() {
-            log_warn!(
-                self.node.as_ref(),
-                "Point cloud buffer full, discarding point"
-            );
-            return;
+        // 检查是否已经达到批次容量，确保在写入前先发布已有数据
+        if self.point_count >= self.batch_dot_num {
+            self.publish_current_batch();
         }
 
-        // Write x,y,z (float32)
-        self.pc_msg.data[offset..offset + 4].copy_from_slice(&x.to_le_bytes());
-        self.pc_msg.data[offset + 4..offset + 8].copy_from_slice(&y.to_le_bytes());
-        self.pc_msg.data[offset + 8..offset + 12].copy_from_slice(&z.to_le_bytes());
+        // 重新计算偏移量（因为可能刚刚发布了数据）
+        let offset = self.point_count * self.pc_msg.point_step as usize;
+        let end_offset = offset + self.pc_msg.point_step as usize;
 
-        // Write intensity (float32)
-        self.pc_msg.data[offset + 12..offset + 16].copy_from_slice(&intensity.to_le_bytes());
+        // 确保不会越界
+        if end_offset > self.pc_msg.data.len() {
+            log_error!(
+                self.node.as_ref(),
+                "Buffer overflow prevented: {} > {}",
+                end_offset,
+                self.pc_msg.data.len()
+            );
+            // 紧急发布当前批次
+            self.publish_current_batch();
 
-        // Write tag (uint8)
-        self.pc_msg.data[offset + 16] = tag;
+            // 重新计算写入位置（不再递归调用）
+            let new_offset = 0; // 因为刚刚清空了，新的偏移量从0开始
 
-        // Write resv (uint8)
-        self.pc_msg.data[offset + 17] = 0;
+            // 写入数据
+            self.pc_msg.data[new_offset..new_offset + 4].copy_from_slice(&x.to_le_bytes());
+            self.pc_msg.data[new_offset + 4..new_offset + 8].copy_from_slice(&y.to_le_bytes());
+            self.pc_msg.data[new_offset + 8..new_offset + 12].copy_from_slice(&z.to_le_bytes());
+            self.pc_msg.data[new_offset + 12..new_offset + 16]
+                .copy_from_slice(&intensity.to_le_bytes());
+            self.pc_msg.data[new_offset + 16] = tag;
+            self.pc_msg.data[new_offset + 17] = 0;
+            self.pc_msg.data[new_offset + 18..new_offset + 26]
+                .copy_from_slice(&timestamp.to_le_bytes());
 
-        // Write timestamp (float64)
-        self.pc_msg.data[offset + 18..offset + 26].copy_from_slice(&timestamp.to_le_bytes());
+            self.point_count = 1; // 设为1，因为我们刚刚添加了一个点
+        } else {
+            // 安全写入
+            self.pc_msg.data[offset..offset + 4].copy_from_slice(&x.to_le_bytes());
+            self.pc_msg.data[offset + 4..offset + 8].copy_from_slice(&y.to_le_bytes());
+            self.pc_msg.data[offset + 8..offset + 12].copy_from_slice(&z.to_le_bytes());
+            self.pc_msg.data[offset + 12..offset + 16].copy_from_slice(&intensity.to_le_bytes());
+            self.pc_msg.data[offset + 16] = tag;
+            self.pc_msg.data[offset + 17] = 0;
+            self.pc_msg.data[offset + 18..offset + 26].copy_from_slice(&timestamp.to_le_bytes());
 
-        self.point_count += 1;
-
-        // Publish if point cloud is full
-        if self.point_count >= self.batch_dot_num {
-            let now = self.node.get_clock().now();
-            self.pc_msg.header.stamp = builtin_interfaces::msg::Time {
-                sec: (now.nsec / 1_000_000_000) as i32,
-                nanosec: (now.nsec % 1_000_000_000) as u32,
-            };
-
-            match self.pc_pub.publish(self.pc_msg.clone()) {
-                Ok(_) => log_debug!(
-                    self.node.as_ref(),
-                    "Published point cloud with {} points",
-                    self.point_count
-                ),
-                Err(e) => log_error!(self.node.as_ref(), "Failed to publish point cloud: {}", e),
-            }
-
-            // Reset for next batch
-            self.point_count = 0;
-            // Clear the data buffer
-            self.pc_msg.data.fill(0);
+            self.point_count += 1;
         }
     }
 
     async fn process_pcd1(&mut self, header: &protocol::Header, points: &[protocol::Pcd1]) {
         for (i, point) in points.iter().enumerate() {
-            // Convert timestamp (assuming it's in nanoseconds)
             let timestamp = header.timestamp as f64
                 + (header.time_interval as f64 * i as f64) / 1_000_000_000.0;
 
             self.write_point_to_pc2(
-                point.x as f32 / 1000.0, // Convert mm to m
+                point.x as f32 / 1000.0,
                 point.y as f32 / 1000.0,
                 point.z as f32 / 1000.0,
                 point.reflectivity as f32,
@@ -302,73 +333,103 @@ impl LivoxLidar {
 
     pub async fn run(&mut self) {
         let mut buf = [0u8; protocol::PC_MSG_SIZE];
-
         let timeout_ms = self
             .node
             .declare_parameter("timeout_ms")
             .default(1000)
             .mandatory()
-            .unwrap();
+            .unwrap()
+            .get() as u64;
 
         loop {
-            // Send control frame if needed
             if self.need_start {
-                if let Err(e) = self.send_control_frame().await {
-                    log_error!(self.node.as_ref(), "Failed to send control frame: {}", e);
-                    // Wait before retrying
-                    task::sleep(Duration::from_millis(100)).await;
-                    continue;
+                log_info!(self.node.as_ref(), "Attempting to send control frame...");
+                match self.send_control_frame().await {
+                    Ok(_) => {
+                        self.need_start = false;
+                    }
+                    Err(e) => {
+                        log_error!(self.node.as_ref(), "Failed to send control frame: {}", e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
                 }
             }
 
-            // Set receive timeout
-            let recv_result = async {
+            let recv_fut = async {
                 match self.socket.recv_from(&mut buf).await {
-                    Ok((size, _)) => {
+                    Ok((size, _src_addr)) => {
+                        if size > 0 {
+                            log_debug!(
+                                self.node.as_ref(),
+                                "Packet header: {:02x?}",
+                                &buf[..size.min(32)]
+                            );
+                        }
+
                         if size < 28 {
                             log_warn!(
                                 self.node.as_ref(),
-                                "Received packet too small ({} bytes)",
+                                "Packet too small ({} bytes), expected at least 28",
                                 size
                             );
                             return Ok(0);
                         }
 
-                        if !protocol::check_header_pcd1(&buf, self.node.clone()) {
+                        let header = match protocol::parse_header(&buf) {
+                            Some(h) => h,
+                            None => {
+                                log_error!(self.node.as_ref(), "Failed to parse header");
+                                return Ok(0);
+                            }
+                        };
+
+                        if header.version == 0xAA {
+                            return Ok(usize::MAX);
+                        }
+
+                        if !protocol::check_header_pcd1(&buf, &header, self.node.clone()) {
                             log_warn!(self.node.as_ref(), "Invalid PCD1 header");
                             return Ok(0);
                         }
 
-                        if let Some(header) = protocol::parse_header(&buf) {
-                            if header.version != 0 || header.data_type != 1 {
-                                log_warn!(self.node.as_ref(), "Unsupported version or data type");
-                                return Ok(0);
-                            }
+                        if header.version != 0 || header.data_type != 1 {
+                            log_warn!(
+                                self.node.as_ref(),
+                                "Unsupported protocol: version={}, data_type={}",
+                                header.version,
+                                header.data_type
+                            );
+                            return Ok(0);
+                        }
 
-                            if let Some(points) = protocol::parse_pcd1(&buf) {
+                        match protocol::parse_pcd1(&buf) {
+                            Some(points) => {
                                 self.process_pcd1(&header, &points).await;
+                                log_info!(self.node.as_ref(), "{:?}", points);
+                                Ok(size)
+                            }
+                            None => {
+                                log_error!(self.node.as_ref(), "Failed to parse points data");
+                                Ok(0)
                             }
                         }
-                        Ok(size)
                     }
                     Err(e) => Err(e),
                 }
             };
 
-            // Add timeout
-            match async_std::future::timeout(
-                Duration::from_millis(timeout_ms.get() as u64), // Use parameterized timeout
-                recv_result,
-            )
-            .await
-            {
-                Ok(Ok(_)) => {} // Successfully received data
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), recv_fut).await {
+                Ok(Ok(size)) if size > 0 => (),
+                Ok(Ok(size)) if size == usize::MAX => (),
+                Ok(Ok(_)) => self.need_start = true,
                 Ok(Err(e)) => {
-                    log_error!(self.node.as_ref(), "Error receiving data: {}", e);
+                    log_error!(self.node.as_ref(), "Receive error: {}", e);
                     self.need_start = true;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(_) => {
-                    log_warn!(self.node.as_ref(), "Receive timeout");
+                    log_warn!(self.node.as_ref(), "Receive timeout after {}ms", timeout_ms);
                     self.need_start = true;
                 }
             }
