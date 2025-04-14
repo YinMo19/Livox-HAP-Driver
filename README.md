@@ -40,8 +40,7 @@ A Rust implementation of the Livox HAP LiDAR driver for ROS 2.
 
     # if example is not needed, you can remove it to speed up compilation
     rm -r src/ros2_rust/examples
-    cd src
-    git clone https://github.com/YinMo19/livox_hap_driver.git
+    git clone https://github.com/YinMo19/livox_hap_driver.git src/livox_hap_driver
 
     colcon build --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON --symlink-install
 
