@@ -23,7 +23,7 @@ A Rust implementation of the Livox HAP LiDAR driver for ROS 2.
 
 ## Installation
 
-1. Clone this repository into your ROS workspace:
+1. Clone this repository into your ROS workspace and build:
 
     ```bash
     # Install Rust, e.g. as described in https://rustup.rs/
@@ -48,14 +48,7 @@ A Rust implementation of the Livox HAP LiDAR driver for ROS 2.
     colcon build --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --cargo-args --release
     ```
 
-2. Build the package:
-
-    ```bash
-    cd ../..
-    colcon build
-    ```
-
-3. Source the workspace:
+2. Source the workspace:
     ```bash
     source install/setup.bash
     ```
