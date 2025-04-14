@@ -421,7 +421,6 @@ impl LivoxLidar {
 
             match tokio::time::timeout(Duration::from_millis(timeout_ms), recv_fut).await {
                 Ok(Ok(size)) if size > 0 => (),
-                Ok(Ok(size)) if size == usize::MAX => (),
                 Ok(Ok(_)) => self.need_start = true,
                 Ok(Err(e)) => {
                     log_error!(self.node.as_ref(), "Receive error: {}", e);
