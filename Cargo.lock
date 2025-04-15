@@ -689,42 +689,6 @@ name = "action_msgs"
 version = "1.2.1"
 
 [[patch.unused]]
-name = "actionlib_msgs"
-version = "4.8.0"
-
-[[patch.unused]]
-name = "autolob_interfaces"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "composition_interfaces"
-version = "1.2.1"
-
-[[patch.unused]]
-name = "diagnostic_msgs"
-version = "4.8.0"
-
-[[patch.unused]]
-name = "example_interfaces"
-version = "0.9.3"
-
-[[patch.unused]]
-name = "lifecycle_msgs"
-version = "1.2.1"
-
-[[patch.unused]]
-name = "livox_hap_driver"
-version = "0.1.1"
-
-[[patch.unused]]
-name = "nav_msgs"
-version = "4.8.0"
-
-[[patch.unused]]
-name = "radar_interface"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "rcl_interfaces"
 version = "1.2.1"
 
@@ -733,33 +697,9 @@ name = "rosgraph_msgs"
 version = "1.2.1"
 
 [[patch.unused]]
-name = "shape_msgs"
-version = "4.8.0"
-
-[[patch.unused]]
-name = "statistics_msgs"
-version = "1.2.1"
-
-[[patch.unused]]
-name = "std_srvs"
-version = "4.8.0"
-
-[[patch.unused]]
-name = "stereo_msgs"
-version = "4.8.0"
-
-[[patch.unused]]
 name = "test_msgs"
 version = "1.2.1"
 
 [[patch.unused]]
-name = "trajectory_msgs"
-version = "4.8.0"
-
-[[patch.unused]]
 name = "unique_identifier_msgs"
 version = "2.2.1"
-
-[[patch.unused]]
-name = "visualization_msgs"
-version = "4.8.0"

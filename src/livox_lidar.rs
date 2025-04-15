@@ -1,3 +1,4 @@
+use crate::protocol;
 use anyhow::{Error, Result};
 use builtin_interfaces;
 use rclrs::*;
@@ -5,8 +6,6 @@ use sensor_msgs::msg::PointCloud2;
 use std::{net::Ipv4Addr, sync::Arc};
 use tokio::net::UdpSocket;
 use tokio::time::Duration;
-
-use crate::protocol;
 
 #[derive(Debug, Clone)]
 struct Ipv4AddrWrapper(Ipv4Addr);
@@ -44,6 +43,7 @@ pub struct LivoxLidar {
     node: Arc<Node>,
     socket: UdpSocket,
     dest_ip: Ipv4Addr,
+    dest_udp_port: u16,
     local_port: u16,
     batch_dot_num: usize,
     line_num: usize,
@@ -52,6 +52,7 @@ pub struct LivoxLidar {
     pc_msg: PointCloud2,
     point_count: usize,
     need_start: bool,
+    time_out: u64,
 }
 
 impl LivoxLidar {
@@ -77,6 +78,25 @@ impl LivoxLidar {
         let line_num = node
             .declare_parameter("lidar_line")
             .default(6)
+            .mandatory()
+            .map_err(|e| Error::msg(e))?;
+
+        let timeout_ms = node
+            .declare_parameter("timeout_ms")
+            .default(1000)
+            .mandatory()
+            .map_err(|e| Error::msg(e))?;
+
+        let udp_range = ParameterRange {
+            lower: Some(1025),
+            upper: Some(65535),
+            step: Some(1),
+        };
+
+        let dest_udp_port = node
+            .declare_parameter("dest_udp_port")
+            .range(udp_range)
+            .default(57000)
             .mandatory()
             .map_err(|e| Error::msg(e))?;
 
@@ -176,6 +196,7 @@ impl LivoxLidar {
             node,
             socket,
             dest_ip: dest_ip.get().0,
+            dest_udp_port: dest_udp_port.get() as u16,
             local_port: local_port.get() as u16,
             batch_dot_num: batch_dot_num.get() as usize,
             line_num: line_num.get() as usize,
@@ -184,14 +205,69 @@ impl LivoxLidar {
             pc_msg,
             point_count: 0,
             need_start: true,
+            time_out: timeout_ms.get() as u64,
         })
     }
 
-    async fn send_control_frame(&mut self) -> Result<()> {
+    pub async fn set_pointcloud_host(
+        &mut self,
+        config: protocol::PointCloudHostConfig,
+    ) -> Result<()> {
+        // 验证IP地址有效性
+        if config.dest_ip.is_unspecified() || config.dest_ip.is_broadcast() {
+            return Err(Error::msg("invalid ipv4 addr"));
+        }
+
         let mut buf = [0u8; 64];
-        let payload = [
-            0x01, 0x02, 0x00, 0x1a, 0x01, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ];
+        let config_bytes = config.to_bytes();
+
+        let message = protocol::KeyValueMessage {
+            key_num: 1,
+            rsvd: 0,
+            entries: vec![(
+                protocol::KeyValueEntry {
+                    key: 0x0006, // pointcloud_host_ipcfg 的键
+                    length: 8,   // 固定8字节
+                },
+                config_bytes.to_vec(),
+            )],
+        };
+
+        let payload = message.to_bytes();
+        let frame_size =
+            protocol::build_control_frame(&mut buf, protocol::SETTING_KEY_VALUE, &payload);
+
+        if frame_size == 0 {
+            return Err(Error::msg("Failed to build control frame"));
+        }
+
+        log_info!(
+            self.node.as_ref(),
+            "Setting point cloud host config: Dest={}:{}, SrcPort={}",
+            config.dest_ip,
+            config.dest_port,
+            config.src_port
+        );
+
+        self.send_control_frame(&buf[..frame_size]).await
+    }
+
+    async fn send_control_ws_start_frame(&mut self) -> Result<()> {
+        let mut buf = [0u8; 64];
+
+        let message = protocol::KeyValueMessage {
+            key_num: 1,
+            rsvd: 0,
+            entries: vec![(
+                protocol::KeyValueEntry {
+                    key: 0x001a,
+                    length: 1,
+                },
+                vec![0x01_u8],
+            )],
+        };
+
+        let payload = message.to_bytes();
 
         let frame_size =
             protocol::build_control_frame(&mut buf, protocol::PUSH_KEY_VALUE, &payload);
@@ -208,20 +284,22 @@ impl LivoxLidar {
             payload
         );
 
+        self.send_control_frame(&buf[..frame_size]).await
+    }
+
+    async fn send_control_frame(&mut self, frame: &[u8]) -> Result<()> {
         match self
             .socket
-            .send_to(&buf[..frame_size], (self.dest_ip, protocol::DEST_PORT))
+            .send_to(frame, (self.dest_ip, protocol::DEST_PORT))
             .await
         {
             Ok(_) => {
                 log_info!(self.node.as_ref(), "Control frame sent successfully");
-                self.need_start = false;
                 Ok(())
             }
             Err(e) => {
-                log_error!(self.node.as_ref(), "Failed to send control frame: {}", e);
-                self.need_start = true;
-                Err(Error::msg(e))
+                log_error!(self.node.as_ref(), "Failed to send frame: {}", e);
+                Err(Error::msg("Failed to build control frame"))
             }
         }
     }
@@ -333,18 +411,27 @@ impl LivoxLidar {
 
     pub async fn run(&mut self) {
         let mut buf = [0u8; protocol::PC_MSG_SIZE];
-        let timeout_ms = self
-            .node
-            .declare_parameter("timeout_ms")
-            .default(1000)
-            .mandatory()
-            .unwrap()
-            .get() as u64;
+        let timeout_ms = self.time_out;
 
         loop {
             if self.need_start {
                 log_info!(self.node.as_ref(), "Attempting to send control frame...");
-                match self.send_control_frame().await {
+                let config = protocol::PointCloudHostConfig {
+                    dest_ip: self.dest_ip,
+                    dest_port: self.dest_udp_port,
+                    ..Default::default()
+                };
+
+                match self.set_pointcloud_host(config).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log_error!(self.node.as_ref(), "Failed to send control frame: {}", e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                }
+
+                match self.send_control_ws_start_frame().await {
                     Ok(_) => {
                         self.need_start = false;
                     }
