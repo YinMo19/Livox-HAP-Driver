@@ -69,40 +69,33 @@ timeout_ms: 1000 # UDP receive timeout
 
 ### Launch File
 
-Example launch file (`launch/livox_driver.launch.xml`):
-
-```xml
-<launch>
-  <arg name="ns" default="radar/lidar_hap"/>
-  <arg name="config" default="$(find-pkg-share livox_hap_driver)/config/livox_minimal.yaml"/>
-
-  <node pkg="livox_hap_driver"
-        exec="livox_hap_driver_node"
-        name="livox_driver"
-        namespace="$(var ns)"
-        output="screen">
-    <param from="$(var config)"/>
-    <param name="frame_id" value="lidar_hap_frame"/>
-  </node>
-</launch>
-```
+Launch file (`launch/livox_driver.launch.py`) to read the config.xml.
 
 ### Command Line
 
 ```bash
-ros2 launch livox_hap_driver livox_driver.launch.xml
+source install/setup.(z/ba/)sh
+ros2 run livox_hap_driver livox_hap_driver_node --ros-args -p dest_ip:="192.168.1.102" -p local_udp_port:=57000
 ```
 
 ## Parameters
 
-| Parameter       | Type   | Default           | Description                         |
-| --------------- | ------ | ----------------- | ----------------------------------- |
-| `dest_ip`       | string | "192.168.1.101"   | Livox HAP device IP address         |
-| `udp_port`      | int    | 57000             | Local UDP port for communication    |
-| `batch_dot_num` | int    | 9600              | Number of points per batch          |
-| `lidar_line`    | int    | 6                 | Number of LiDAR lines (1-128)       |
-| `timeout_ms`    | int    | 1000              | UDP receive timeout in milliseconds |
-| `frame_id`      | string | "lidar_hap_frame" | TF frame ID for point cloud         |
+| Parameter        | Type   | Default           | Description                         |
+| ---------------- | ------ | ----------------- | ----------------------------------- |
+| `dest_ip`        | string | "192.168.1.101"   | Livox HAP device IP address         |
+| `dest_udp_port`  | int    | 57000             | dest UDP port for communication     |
+| `local_ip`       | int    | "192.168.1.50"    | Local ip IP address                 |
+| `local_udp_port` | int    | 57000             | Local UDP port for communication    |
+| `batch_dot_num`  | int    | 9600              | Number of points per batch          |
+| `lidar_line`     | int    | 6                 | Number of LiDAR lines (1-128)       |
+| `timeout_ms`     | int    | 1000              | UDP receive timeout in milliseconds |
+| `frame_id`       | string | "lidar_hap_frame" | TF frame ID for point cloud         |
+
+
+namespace can be set in it. But the command line param is
+```sh
+ros2 run xxx xxx --ros-args <xxxx....zzzz> -r __ns:="/xxxx/yyyyy"
+```
 
 ## Topics
 
