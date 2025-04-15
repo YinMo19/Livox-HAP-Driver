@@ -69,7 +69,7 @@ timeout_ms: 1000 # UDP receive timeout
 
 ### Launch File
 
-Launch file (`launch/livox_driver.launch.py`) to read the config.xml.
+Launch file ( write a `launch.py`) to read the config yaml and launch it. Ref to cli below.
 
 ### Command Line
 
@@ -84,7 +84,7 @@ ros2 run livox_hap_driver livox_hap_driver_node --ros-args -p dest_ip:="192.168.
 | ---------------- | ------ | ----------------- | ----------------------------------- |
 | `dest_ip`        | string | "192.168.1.101"   | Livox HAP device IP address         |
 | `dest_udp_port`  | int    | 57000             | dest UDP port for communication     |
-| `local_ip`       | int    | "192.168.1.50"    | Local ip IP address                 |
+| `local_ip`       | string | "192.168.1.50"    | Local ip IP address                 |
 | `local_udp_port` | int    | 57000             | Local UDP port for communication    |
 | `batch_dot_num`  | int    | 9600              | Number of points per batch          |
 | `lidar_line`     | int    | 6                 | Number of LiDAR lines (1-128)       |
