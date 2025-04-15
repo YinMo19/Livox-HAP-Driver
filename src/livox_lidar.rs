@@ -43,6 +43,7 @@ pub struct LivoxLidar {
     node: Arc<Node>,
     socket: UdpSocket,
     dest_ip: Ipv4Addr,
+    local_ip: Ipv4Addr,
     dest_udp_port: u16,
     local_port: u16,
     batch_dot_num: usize,
@@ -50,7 +51,7 @@ pub struct LivoxLidar {
     frame_id: String,
     pc_pub: Arc<Publisher<PointCloud2>>,
     pc_msg: PointCloud2,
-    point_count: usize,
+    point_index: usize,
     need_start: bool,
     time_out: u64,
 }
@@ -63,8 +64,27 @@ impl LivoxLidar {
             .mandatory()
             .map_err(|e| Error::msg(e))?;
 
+        let udp_range = ParameterRange {
+            lower: Some(1025),
+            upper: Some(65535),
+            step: Some(1),
+        };
+
+        let dest_udp_port = node
+            .declare_parameter("dest_udp_port")
+            .range(udp_range)
+            .default(57000)
+            .mandatory()
+            .map_err(|e| Error::msg(e))?;
+
+        let local_ip = node
+            .declare_parameter("local_ip")
+            .default(Ipv4AddrWrapper("192.168.1.50".parse().unwrap()))
+            .mandatory()
+            .map_err(|e| Error::msg(e))?;
+
         let local_port = node
-            .declare_parameter("udp_port")
+            .declare_parameter("local_udp_port")
             .default(57000)
             .mandatory()
             .map_err(|e| Error::msg(e))?;
@@ -87,19 +107,6 @@ impl LivoxLidar {
             .mandatory()
             .map_err(|e| Error::msg(e))?;
 
-        let udp_range = ParameterRange {
-            lower: Some(1025),
-            upper: Some(65535),
-            step: Some(1),
-        };
-
-        let dest_udp_port = node
-            .declare_parameter("dest_udp_port")
-            .range(udp_range)
-            .default(57000)
-            .mandatory()
-            .map_err(|e| Error::msg(e))?;
-
         // Validate parameters
         if line_num.get() < 1 || line_num.get() > 128 {
             return Err(Error::msg("Invalid line_num, must be between 1 and 128"));
@@ -114,11 +121,13 @@ impl LivoxLidar {
 
         log_info!(
             node.as_ref(),
-            "Initializing with parameters: dest_ip={}, port={}, batch_dot_num={}, line_num={}",
+            "Initializing with parameters: dest_ip={}, dest_port={}, batch_dot_num={}, line_num={}, local_ip={}, local_port={}",
             dest_ip.get().0,
-            local_port.get(),
+            dest_udp_port.get(),
             batch_dot_num.get(),
-            line_num.get()
+            line_num.get(),
+            local_ip.get().0,
+            local_port.get()
         );
 
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, local_port.get() as u16))
@@ -129,7 +138,12 @@ impl LivoxLidar {
             })?;
 
         let pc_pub = node
-            .create_publisher::<PointCloud2>("pc_raw".keep_last(10).transient_local())
+            .create_publisher::<PointCloud2>(
+                "pc_raw"
+                    .keep_last(10)
+                    .best_effort()
+                    .durability(QoSDurabilityPolicy::Volatile), // Larger queue size
+            )
             .map_err(|e| {
                 log_error!(node.as_ref(), "Failed to create publisher: {}", e);
                 Error::msg(e)
@@ -144,6 +158,7 @@ impl LivoxLidar {
         pc_msg.point_step = 26; // x,y,z (float32) + intensity (float32) + tag (uint8) + resv (uint8) + timestamp (float64)
         pc_msg.row_step = pc_msg.width * pc_msg.point_step;
         pc_msg.is_dense = true;
+        pc_msg.data = vec![0; pc_msg.row_step as usize];
 
         // Set fields
         let mut fields = Vec::new();
@@ -190,12 +205,12 @@ impl LivoxLidar {
             count: 1,
         });
         pc_msg.fields = fields;
-        pc_msg.data = vec![0; (pc_msg.width * pc_msg.point_step) as usize];
 
         Ok(Self {
             node,
             socket,
             dest_ip: dest_ip.get().0,
+            local_ip: local_ip.get().0,
             dest_udp_port: dest_udp_port.get() as u16,
             local_port: local_port.get() as u16,
             batch_dot_num: batch_dot_num.get() as usize,
@@ -203,10 +218,59 @@ impl LivoxLidar {
             frame_id,
             pc_pub,
             pc_msg,
-            point_count: 0,
+            point_index: 0, // 初始化索引为0
             need_start: true,
             time_out: timeout_ms.get() as u64,
         })
+    }
+
+    fn write_point_to_pc2(&mut self, point: &protocol::LivoxPointXyzrtlt) {
+        let offset = self.point_index * std::mem::size_of::<protocol::LivoxPointXyzrtlt>();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                point as *const _ as *const u8,
+                std::mem::size_of::<protocol::LivoxPointXyzrtlt>(),
+            )
+        };
+        self.pc_msg.data[offset..offset + 26].copy_from_slice(bytes);
+        self.point_index += 1;
+
+        // 严格按批次发布（不检查越界，假设缓冲区足够）
+        if self.point_index >= self.batch_dot_num {
+            self.publish_current_batch();
+        }
+    }
+
+    fn publish_current_batch(&mut self) {
+        if self.point_index == 0 {
+            return; // 没有数据时不发布
+        }
+
+        let now = self.node.get_clock().now();
+        self.pc_msg.header.stamp = builtin_interfaces::msg::Time {
+            sec: (now.nsec / 1_000_000_000) as i32,
+            nanosec: (now.nsec % 1_000_000_000) as u32,
+        };
+
+        // 更新实际点数
+        self.pc_msg.width = self.point_index as u32;
+        self.pc_msg.row_step = self.pc_msg.width * self.pc_msg.point_step;
+
+        // 发布点云
+        match self.pc_pub.publish(self.pc_msg.clone()) {
+            Ok(_) => log_debug!(
+                self.node.as_ref(),
+                "Published point cloud with {} points",
+                self.point_index
+            ),
+            Err(e) => log_error!(self.node.as_ref(), "Failed to publish point cloud: {}", e),
+        }
+
+        // 重置状态
+        self.pc_msg.data.fill(0);
+        self.point_index = 0;
+        self.pc_msg.width = self.batch_dot_num as u32;
+        self.pc_msg.row_step = self.pc_msg.width * self.pc_msg.point_step;
     }
 
     pub async fn set_pointcloud_host(
@@ -247,6 +311,14 @@ impl LivoxLidar {
             config.dest_ip,
             config.dest_port,
             config.src_port
+        );
+
+        log_info!(
+            self.node.as_ref(),
+            "Sending control frame to {}:{} with payload: {:02x?}",
+            self.dest_ip,
+            protocol::DEST_PORT,
+            payload
         );
 
         self.send_control_frame(&buf[..frame_size]).await
@@ -304,108 +376,23 @@ impl LivoxLidar {
         }
     }
 
-    fn publish_current_batch(&mut self) {
-        let now = self.node.get_clock().now();
-        self.pc_msg.header.stamp = builtin_interfaces::msg::Time {
-            sec: (now.nsec / 1_000_000_000) as i32,
-            nanosec: (now.nsec % 1_000_000_000) as u32,
-        };
-
-        // 更新消息的点数
-        self.pc_msg.width = self.point_count as u32;
-        self.pc_msg.row_step = self.pc_msg.width * self.pc_msg.point_step;
-
-        match self.pc_pub.publish(self.pc_msg.clone()) {
-            Ok(_) => log_debug!(
-                self.node.as_ref(),
-                "Published point cloud with {} points",
-                self.point_count
-            ),
-            Err(e) => log_error!(self.node.as_ref(), "Failed to publish point cloud: {}", e),
-        }
-
-        // 重置点计数和清空缓冲区
-        self.point_count = 0;
-
-        // 重新设置消息宽度为最大批次大小
-        self.pc_msg.width = self.batch_dot_num as u32;
-        self.pc_msg.row_step = self.pc_msg.width * self.pc_msg.point_step;
-
-        // 清空或重新分配缓冲区
-        self.pc_msg.data = vec![0; (self.pc_msg.width * self.pc_msg.point_step) as usize];
-    }
-
-    fn write_point_to_pc2(
-        &mut self,
-        x: f32,
-        y: f32,
-        z: f32,
-        intensity: f32,
-        tag: u8,
-        timestamp: f64,
-    ) {
-        // 检查是否已经达到批次容量，确保在写入前先发布已有数据
-        if self.point_count >= self.batch_dot_num {
-            self.publish_current_batch();
-        }
-
-        // 重新计算偏移量（因为可能刚刚发布了数据）
-        let offset = self.point_count * self.pc_msg.point_step as usize;
-        let end_offset = offset + self.pc_msg.point_step as usize;
-
-        // 确保不会越界
-        if end_offset > self.pc_msg.data.len() {
-            log_error!(
-                self.node.as_ref(),
-                "Buffer overflow prevented: {} > {}",
-                end_offset,
-                self.pc_msg.data.len()
-            );
-            // 紧急发布当前批次
-            self.publish_current_batch();
-
-            // 重新计算写入位置（不再递归调用）
-            let new_offset = 0; // 因为刚刚清空了，新的偏移量从0开始
-
-            // 写入数据
-            self.pc_msg.data[new_offset..new_offset + 4].copy_from_slice(&x.to_le_bytes());
-            self.pc_msg.data[new_offset + 4..new_offset + 8].copy_from_slice(&y.to_le_bytes());
-            self.pc_msg.data[new_offset + 8..new_offset + 12].copy_from_slice(&z.to_le_bytes());
-            self.pc_msg.data[new_offset + 12..new_offset + 16]
-                .copy_from_slice(&intensity.to_le_bytes());
-            self.pc_msg.data[new_offset + 16] = tag;
-            self.pc_msg.data[new_offset + 17] = 0;
-            self.pc_msg.data[new_offset + 18..new_offset + 26]
-                .copy_from_slice(&timestamp.to_le_bytes());
-
-            self.point_count = 1; // 设为1，因为我们刚刚添加了一个点
-        } else {
-            // 安全写入
-            self.pc_msg.data[offset..offset + 4].copy_from_slice(&x.to_le_bytes());
-            self.pc_msg.data[offset + 4..offset + 8].copy_from_slice(&y.to_le_bytes());
-            self.pc_msg.data[offset + 8..offset + 12].copy_from_slice(&z.to_le_bytes());
-            self.pc_msg.data[offset + 12..offset + 16].copy_from_slice(&intensity.to_le_bytes());
-            self.pc_msg.data[offset + 16] = tag;
-            self.pc_msg.data[offset + 17] = 0;
-            self.pc_msg.data[offset + 18..offset + 26].copy_from_slice(&timestamp.to_le_bytes());
-
-            self.point_count += 1;
-        }
-    }
-
     async fn process_pcd1(&mut self, header: &protocol::Header, points: &[protocol::Pcd1]) {
         for (i, point) in points.iter().enumerate() {
-            let timestamp = header.timestamp as f64
-                + (header.time_interval as f64 * i as f64) / 1_000_000_000.0;
+            let timestamp = (header.timestamp + header.time_interval as u64 * i as u64) as f64;
 
-            self.write_point_to_pc2(
-                point.x as f32 / 1000.0,
-                point.y as f32 / 1000.0,
-                point.z as f32 / 1000.0,
-                point.reflectivity as f32,
-                point.tag,
+            // println!(
+            //     "Raw point [{i}]: x={}, y={}, z={}",
+            //     point.x, point.y, point.z
+            // );
+            self.write_point_to_pc2(&protocol::LivoxPointXyzrtlt {
+                x: point.x as f32 / 1000.0,
+                y: point.y as f32 / 1000.0,
+                z: point.z as f32 / 1000.0,
+                reflectivity: point.reflectivity as f32,
+                tag: point.tag,
+                resv: 0,
                 timestamp,
-            );
+            });
         }
     }
 
@@ -417,8 +404,8 @@ impl LivoxLidar {
             if self.need_start {
                 log_info!(self.node.as_ref(), "Attempting to send control frame...");
                 let config = protocol::PointCloudHostConfig {
-                    dest_ip: self.dest_ip,
-                    dest_port: self.dest_udp_port,
+                    dest_ip: self.local_ip,
+                    dest_port: self.local_port,
                     ..Default::default()
                 };
 
@@ -454,14 +441,14 @@ impl LivoxLidar {
                             );
                         }
 
-                        if size < 28 {
-                            log_warn!(
-                                self.node.as_ref(),
-                                "Packet too small ({} bytes), expected at least 28",
-                                size
-                            );
-                            return Ok(0);
-                        }
+                        // if size < 28 {
+                        //     log_warn!(
+                        //         self.node.as_ref(),
+                        //         "Packet too small ({} bytes), expected at least 28",
+                        //         size
+                        //     );
+                        //     return Ok(0);
+                        // }
 
                         let header = match protocol::parse_header(&buf) {
                             Some(h) => h,
@@ -493,7 +480,7 @@ impl LivoxLidar {
                         match protocol::parse_pcd1(&buf) {
                             Some(points) => {
                                 self.process_pcd1(&header, &points).await;
-                                log_info!(self.node.as_ref(), "{:?}", points);
+                                // log_info!(self.node.as_ref(), "{:?}", points);
                                 Ok(size)
                             }
                             None => {

@@ -6,6 +6,18 @@ use rclrs::*;
 use std::io::Cursor;
 use std::sync::Arc;
 
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct LivoxPointXyzrtlt {
+    pub x: f32, // 单位: m
+    pub y: f32,
+    pub z: f32,
+    pub reflectivity: f32,
+    pub tag: u8,
+    pub resv: u8,
+    pub timestamp: f64, // 8字节时间戳
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Pcd1 {
     pub x: i32,
@@ -22,7 +34,7 @@ pub fn parse_pcd1(data: &[u8]) -> Option<Vec<Pcd1>> {
 
     // Each Pcd1 point is 14 bytes (3x i32 + 2x u8 + 2 padding bytes)
     const POINT_SIZE: usize = 14;
-    let points_data = &data[28..]; // Skip header
+    let points_data = &data[36..]; // Skip header
     let num_points = points_data.len() / POINT_SIZE;
 
     let mut points = Vec::with_capacity(num_points);

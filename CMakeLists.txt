@@ -1,16 +1,13 @@
 cmake_minimum_required(VERSION 3.5)
+
 project(livox_hap_driver)
+if("$ENV{ROS_DISTRO}" STRLESS_EQUAL "humble")
+    find_package(rosidl_cmake REQUIRED)
+    ament_export_dependencies(rosidl_cmake)
+endif()
 
-# 启用 Rust 支持（需安装 FindRust.cmake 或手动配置）
-find_package(Rust REQUIRED)
+ament_python_install_package(${PROJECT_NAME})
 
-# 定义 Rust 构建目标
-add_custom_target(
-  your_rust_target ALL
-  COMMAND cargo build --release
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  COMMENT "Building Rust code"
+install(DIRECTORY launch config
+  DESTINATION share/${PROJECT_NAME}
 )
-
-# 确保编译命令包含 Rust 路径（可选）
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/target/release)

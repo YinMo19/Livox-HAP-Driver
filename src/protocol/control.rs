@@ -12,9 +12,9 @@ pub struct PointCloudHostConfig {
 impl Default for PointCloudHostConfig {
     fn default() -> Self {
         Self {
-            dest_ip: Ipv4Addr::new(192, 168, 1, 100), // 示例默认值
-            dest_port: 57001,                         // 常见LiDAR端口
-            src_port: 57000,                          // 根据文档固定值
+            dest_ip: Ipv4Addr::new(192, 168, 1, 50), // 示例默认值
+            dest_port: 57001,                        // 常见LiDAR端口
+            src_port: 57000,                         // 根据文档固定值
         }
     }
 }
